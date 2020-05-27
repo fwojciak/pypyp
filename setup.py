@@ -22,7 +22,7 @@ setup(
         "Topic :: Utilities",
     ],
     py_modules=["pyp"],
-    entry_points={"console_scripts": ["pyp=pyp:main"]},
+    entry_points={"console_scripts": ["pypyp=pyp:main"]},
     install_requires=["astunparse; python_version<'3.9'"],
     python_requires=">=3.6",
 )
