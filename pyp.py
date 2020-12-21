@@ -9,9 +9,10 @@ import sys
 import textwrap
 import traceback
 from collections import defaultdict
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 
 __all__ = ["pypprint"]
+__version__ = "0.3.3"
 
 
 def pypprint(*args, **kwargs):  # type: ignore
@@ -38,82 +39,125 @@ def pypprint(*args, **kwargs):  # type: ignore
         print(x, **kwargs)
 
 
-def find_names(tree: ast.AST) -> Tuple[Set[str], Set[str]]:
-    """Returns a tuple of defined and undefined names in the given AST.
+class NameFinder(ast.NodeVisitor):
+    """Finds undefined names, top-level defined names and wildcard imports in the given AST.
 
-    A defined name is any name that is stored to (approximately*).
-    An undefined name is any name that is loaded before it is defined.
+    A top-level defined name is any name that is stored to in the top-level scopes of ``trees``.
+    An undefined name is any name that is loaded before it is defined (in any scope).
 
-    [*] The details are below in code, but imports, function and class definitions, function
-    arguments and exception handlers also define names for our purposes.
-
-    Note that we ignore deletes and scopes. Our notion of definition is very simplistic; once
-    something is defined, it's never undefined. This is an okay approximation for our use case.
-    Note used builtins will appear in undefined names.
+    Notes: a) we ignore deletes, b) used builtins will appear in undefined names, c) this logic
+    doesn't fully support comprehension / nonlocal / global / late-binding scopes.
 
     """
-    undefined = set()
-    defined = set()
 
-    class _Finder(ast.NodeVisitor):
-        def generic_visit(self, node: ast.AST) -> None:
-            def order(f_v: Tuple[str, Any]) -> int:
-                # This ordering fixes comprehensions, loops, assignments
-                ordering = {"generators": -2, "iter": -2, "value": -1}
-                # name is used in (Async)FunctionDef, ClassDef, ExceptHandler, alias
-                # Stable sort order works for ExceptHandler and alias is special cased below
-                name = 0
-                args = 0
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    name = -1  # Functions are okay with recursion
-                    args = -2  # but not with self reference while defining default values
-                if isinstance(node, ast.ClassDef):
-                    name = 1  # Classes are not okay with self reference
-                ordering.update({"decorator_list": -3, "name": name, "args": args})
-                return ordering.get(f_v[0], 0)
+    def __init__(self, *trees: ast.AST) -> None:
+        self._scopes: List[Set[str]] = [set()]
+        self.undefined: Set[str] = set()
+        self.wildcard_imports: List[str] = []
+        for tree in trees:
+            self.visit(tree)
+        assert len(self._scopes) == 1
 
-            # Adapted from ast.NodeVisitor.generic_visit, but re-orders traversal a little using
-            # ``order`` and adds name fields to defined (except for alias.name)
-            for _field, value in sorted(ast.iter_fields(node), key=order):
-                if _field == "name":
-                    if value is not None:  # ExceptHandler's name can be None
-                        # Mark names as defined, see docstring and comments in ``order``
-                        defined.add(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, ast.AST):
-                            self.visit(item)
-                elif isinstance(value, ast.AST):
-                    self.visit(value)
+    @property
+    def top_level_defined(self) -> Set[str]:
+        return self._scopes[0]
 
-        def visit_Name(self, node: ast.Name) -> None:
-            if isinstance(node.ctx, ast.Load):
-                if node.id not in defined:
-                    undefined.add(node.id)
-            elif isinstance(node.ctx, ast.Store):
-                defined.add(node.id)
-            # Ignore deletes, see docstring
+    def flexible_visit(self, value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, ast.AST):
+                    self.visit(item)
+        elif isinstance(value, ast.AST):
+            self.visit(value)
+
+    def generic_visit(self, node: ast.AST) -> None:
+        def order(f_v: Tuple[str, Any]) -> int:
+            # This ordering fixes comprehensions, loops, assignments
+            return {"generators": -2, "iter": -2, "value": -1}.get(f_v[0], 0)
+
+        # Adapted from ast.NodeVisitor.generic_visit, but re-orders traversal a little
+        for _, value in sorted(ast.iter_fields(node), key=order):
+            self.flexible_visit(value)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load):
+            if all(node.id not in d for d in self._scopes):
+                self.undefined.add(node.id)
+        elif isinstance(node.ctx, ast.Store):
+            self._scopes[-1].add(node.id)
+        # Ignore deletes, see docstring
+        self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self._scopes[-1] |= self._scopes[0] & set(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        if len(self._scopes) >= 2:
+            self._scopes[-1] |= self._scopes[-2] & set(node.names)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            # TODO: think about global, nonlocal
+            if node.target.id not in self._scopes[-1]:
+                self.undefined.add(node.target.id)
+        self.generic_visit(node)
+
+    def visit_alias(self, node: ast.alias) -> None:
+        if node.name != "*":
+            self._scopes[-1].add(node.asname if node.asname is not None else node.name)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is not None and "*" in (a.name for a in node.names):
+            self.wildcard_imports.append(node.module)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.flexible_visit(node.decorator_list)
+        self.flexible_visit(node.bases)
+        self.flexible_visit(node.keywords)
+
+        self._scopes.append(set())
+        self.flexible_visit(node.body)
+        self._scopes.pop()
+        # Classes are not okay with self-reference, so define ``name`` afterwards
+        self._scopes[-1].add(node.name)
+
+    def visit_function_helper(self, node: Any, name: Optional[str] = None) -> None:
+        # Functions are okay with recursion, but not self-reference while defining default values
+        self.flexible_visit(node.args)
+        if name is not None:
+            self._scopes[-1].add(name)
+
+        self._scopes.append(set())
+        for arg_node in ast.iter_child_nodes(node.args):
+            if isinstance(arg_node, ast.arg):
+                self._scopes[-1].add(arg_node.arg)
+        self.flexible_visit(node.body)
+        self._scopes.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.flexible_visit(node.decorator_list)
+        self.visit_function_helper(node, node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.flexible_visit(node.decorator_list)
+        self.visit_function_helper(node, node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.visit_function_helper(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        # ExceptHandler's name is scoped to the handler. If name exists and the name is not already
+        # defined, we'll define then undefine it to mimic the scope.
+        if not node.name or node.name in self._scopes[-1]:
             self.generic_visit(node)
+            return
 
-        def visit_AugAssign(self, node: ast.AugAssign) -> None:
-            if isinstance(node.target, ast.Name):
-                if node.target.id not in defined:
-                    undefined.add(node.target.id)
-            self.generic_visit(node)
-
-        def visit_arg(self, node: ast.arg) -> None:
-            # Mark arguments as defined, see docstring
-            defined.add(node.arg)
-            self.generic_visit(node)
-
-        def visit_alias(self, node: ast.alias) -> None:
-            # Mark imports as defined, see docstring
-            # Note that we don't generic_visit here, since a) alias has a name field but we don't
-            # necessarily want to define that name, as seen below, b) we're a terminal node
-            defined.add(node.asname if node.asname is not None else node.name)
-
-    _Finder().visit(tree)
-    return defined, undefined
+        self.flexible_visit(node.type)
+        assert node.name is not None
+        self._scopes[-1].add(node.name)
+        self.flexible_visit(node.body)
+        self._scopes[-1].remove(node.name)
 
 
 def dfs_walk(node: ast.AST) -> Iterator[ast.AST]:
@@ -165,7 +209,7 @@ class PypConfig:
         # List of config parts
         self.parts: List[ast.stmt] = config_ast.body
         # Maps from a name to index of config part that defines it
-        self.defined_names: Dict[str, int] = {}
+        self.name_to_def: Dict[str, int] = {}
         # Maps from index of config part to undefined names it needs
         self.requires: Dict[int, Set[str]] = defaultdict(set)
         # Modules from which automatic imports work without qualification, ordered by AST encounter
@@ -177,45 +221,24 @@ class PypConfig:
                 itertools.takewhile(lambda l: l.startswith("#"), config_contents.splitlines())
             )
 
-        def add_defs(index: int, defs: Set[str]) -> None:
-            for name in defs:
-                if self.defined_names.get(name, index) != index:
-                    raise PypError(f"Config has multiple definitions of {repr(name)}")
-                self.defined_names[name] = index
-
-        def inner(index: int, part: ast.AST) -> None:
-            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                # Functions and classes have their own scopes, so discard names that they define
-                _, undefs = find_names(part)
-                add_defs(index, {part.name})
-                self.requires[index].update(undefs)
-            elif isinstance(part, ast.ImportFrom):
-                if part.module is None:
-                    raise PypError(f"Config has unsupported import on line {part.lineno}")
-                defs, _ = find_names(part)
-                if "*" in defs:
-                    defs.remove("*")
-                    self.wildcard_imports.append(part.module)
-                add_defs(index, defs)
-            elif isinstance(part, (ast.Import, ast.Assign, ast.AnnAssign)):
-                defs, undefs = find_names(part)
-                add_defs(index, defs)
-                self.requires[index].update(undefs)
-            elif hasattr(part, "body") or hasattr(part, "orelse"):
-                # This allows us to do e.g., basic conditional definition
-                for part in getattr(part, "body", []) + getattr(part, "orelse", []):
-                    inner(index, part)
-            else:
+        top_level: Tuple[Any, ...] = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        top_level += (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.If, ast.Try)
+        for index, part in enumerate(self.parts):
+            if not isinstance(part, top_level):
                 node_type = type(
                     part.value if isinstance(part, ast.Expr) else part
                 ).__name__.lower()
                 raise PypError(
-                    "Config only supports a subset of Python at module level; "
+                    "Config only supports a subset of Python at top level; "
                     f"unsupported construct ({node_type}) on line {part.lineno}"
                 )
-
-        for index, part in enumerate(self.parts):
-            inner(index, part)
+            f = NameFinder(part)
+            for name in f.top_level_defined:
+                if self.name_to_def.get(name, index) != index:
+                    raise PypError(f"Config has multiple definitions of {repr(name)}")
+                self.name_to_def[name] = index
+            self.requires[index] = f.undefined
+            self.wildcard_imports.extend(f.wildcard_imports)
 
 
 class PypTransform:
@@ -249,12 +272,10 @@ class PypTransform:
         self.tree = parse_input(code)
         self.after_tree = parse_input(after)
 
-        self.defined: Set[str] = set()
-        self.undefined: Set[str] = set()
-        for t in (self.before_tree, self.tree, self.after_tree):
-            _def, _undef = find_names(t)
-            self.undefined |= _undef - self.defined
-            self.defined |= _def
+        f = NameFinder(self.before_tree, self.tree, self.after_tree)
+        self.defined: Set[str] = f.top_level_defined
+        self.undefined: Set[str] = f.undefined
+        self.wildcard_imports: List[str] = f.wildcard_imports
 
         self.define_pypprint = define_pypprint
         self.config = config
@@ -267,7 +288,7 @@ class PypTransform:
         self.defined.add(name)
         self.undefined.discard(name)
 
-    def get_valid_name(self, name: str) -> str:
+    def get_valid_name_in_top_scope(self, name: str) -> str:
         """Return a name related to ``name`` that does not conflict with existing definitions."""
         while name in self.defined or name in self.undefined:
             name += "_"
@@ -280,7 +301,7 @@ class PypTransform:
         thing in the tree is an expression, modifying the tree to print it.
 
         """
-        if self.undefined & {"print", "pprint", "pypprint"}:  # has an explicit print
+        if self.undefined & {"print", "pprint", "pp", "pypprint"}:  # has an explicit print
             return
 
         def inner(body: List[ast.stmt], use_pypprint: bool = False) -> bool:
@@ -293,6 +314,8 @@ class PypTransform:
                 # If the last thing in the tree is a statement that has a body (and doesn't have an
                 # orelse, since users could expect the print in that branch), recursively look
                 # for a standalone expression.
+                # Technically, we should check to see that we're not entering a different scope,
+                # e.g., ``pyp 'x' 'def f(x): (output := x) + 1' --explain`` looks problematic.
                 if hasattr(body[-1], "body") and not getattr(body[-1], "orelse", []):
                     return inner(body[-1].body, use_pypprint)  # type: ignore
                 return False
@@ -301,7 +324,7 @@ class PypTransform:
                 output = body[-1].value.id
                 body.pop()
             else:
-                output = self.get_valid_name("output")
+                output = self.get_valid_name_in_top_scope("output")
                 self.define(output)
                 body[-1] = ast.Assign(
                     targets=[ast.Name(id=output, ctx=ast.Store())], value=body[-1].value
@@ -343,24 +366,12 @@ class PypTransform:
         How we do this depends on which magic variables are used.
 
         """
-        # We'll use sys here no matter what; add it to undefined so we import it later
-        self.undefined.add("sys")
-
         MAGIC_VARS = {
             "index": {"i", "idx", "index"},
             "loop": {"line", "x", "l", "s"},
             "input": {"lines", "stdin"},
         }
         possible_vars = {typ: names & self.undefined for typ, names in MAGIC_VARS.items()}
-
-        if not any(possible_vars.values()):
-            no_pipe_assertion = ast.parse(
-                "assert sys.stdin.isatty() or not sys.stdin.read(), "
-                '''"The command doesn't process input, but input is present"'''
-            )
-            self.tree.body = no_pipe_assertion.body + self.tree.body
-            self.use_pypprint_for_implicit_print()
-            return
 
         if (possible_vars["loop"] or possible_vars["index"]) and possible_vars["input"]:
             loop_names = ", ".join(possible_vars["loop"] or possible_vars["index"])
@@ -374,6 +385,9 @@ class PypTransform:
             if len(names) > 1:
                 names_str = ", ".join(names)
                 raise PypError(f"Multiple candidates for {typ} variable: {names_str}")
+
+        # We'll use sys here no matter what; add it to undefined so we import it later
+        self.undefined.add("sys")
 
         if possible_vars["loop"] or possible_vars["index"]:
             # We'll loop over stdin and define loop / index variables
@@ -396,7 +410,7 @@ class PypTransform:
             loop: ast.For = ast.parse(for_loop).body[0]  # type: ignore
             loop.body.extend(self.tree.body)
             self.tree.body = [loop]
-        else:
+        elif possible_vars["input"]:
             # We'll read from stdin and define the necessary input variable
             input_var = possible_vars["input"].pop()
             self.define(input_var)
@@ -408,23 +422,30 @@ class PypTransform:
 
             self.tree.body = input_assign.body + self.tree.body
             self.use_pypprint_for_implicit_print()
+        else:
+            no_pipe_assertion = ast.parse(
+                "assert sys.stdin.isatty() or not sys.stdin.read(), "
+                '''"The command doesn't process input, but input is present"'''
+            )
+            self.tree.body = no_pipe_assertion.body + self.tree.body
+            self.use_pypprint_for_implicit_print()
 
     def build_missing_config(self) -> None:
         """Modifies the AST to define undefined names defined in config."""
         config_definitions: Set[str] = set()
         attempt_to_define = set(self.undefined)
         while attempt_to_define:
-            can_define = attempt_to_define & set(self.config.defined_names)
+            can_define = attempt_to_define & set(self.config.name_to_def)
             config_definitions.update(can_define)
             # The things we can define might in turn require some definitions, so update the things
             # we need to attempt to define and loop
             attempt_to_define = set()
             for name in can_define:
-                attempt_to_define.update(self.config.requires[self.config.defined_names[name]])
+                attempt_to_define.update(self.config.requires[self.config.name_to_def[name]])
             # We don't need to attempt to define things we've already decided we need to define
             attempt_to_define -= config_definitions
 
-        config_indices = sorted({self.config.defined_names[name] for name in config_definitions})
+        config_indices = sorted({self.config.name_to_def[name] for name in config_definitions})
         self.before_tree.body = [
             self.config.parts[i] for i in config_indices
         ] + self.before_tree.body
@@ -460,7 +481,11 @@ class PypTransform:
             return getattr(mod, "__all__", (n for n in dir(mod) if not n.startswith("_")))
 
         subimports = {"Path": "pathlib", "pp": "pprint"}
-        wildcard_imports = ["itertools", "math", "collections"] + self.config.wildcard_imports
+        wildcard_imports = (
+            ["itertools", "math", "collections"]
+            + self.config.wildcard_imports
+            + self.wildcard_imports
+        )
         subimports.update(
             {name: module for module in wildcard_imports for name in get_names_in_module(module)}
         )
@@ -493,25 +518,27 @@ class PypTransform:
         return ast.fix_missing_locations(ret)
 
 
-def unparse(tree: ast.AST, no_fallback: bool = False) -> str:
+def unparse(tree: ast.AST, short_fallback: bool = False) -> str:
     """Returns Python code equivalent to executing ``tree``."""
     if sys.version_info >= (3, 9):
         return ast.unparse(tree)
     try:
         import astunparse  # type: ignore
 
-        return astunparse.unparse(tree)  # type: ignore
+        return cast(str, astunparse.unparse(tree))
     except ImportError:
         pass
-    if no_fallback:
-        raise ImportError
+    if short_fallback:
+        return f"# {ast.dump(tree)}  # --explain has instructions to make this readable"
     return f"""
 from ast import *
 tree = fix_missing_locations({ast.dump(tree)})
-# To see this in human readable form, run `pyp` with Python 3.9
+
+# To see this in human readable form, run pyp with Python 3.9
 # Alternatively, install a third party ast unparser: `python3 -m pip install astunparse`
 # Once you've done that, simply re-run.
 # In the meantime, this script is fully functional, if not easily readable or modifiable...
+
 exec(compile(tree, filename="<ast>", mode="exec"), {{}})
 """
 
@@ -522,38 +549,59 @@ def run_pyp(args: argparse.Namespace) -> None:
     if args.explain:
         print(config.shebang)
         print(unparse(tree))
-    else:
+        return
+    try:
+        exec(compile(tree, filename="<pyp>", mode="exec"), {})
+    except Exception as e:
         try:
-            exec(compile(tree, filename="<pyp>", mode="exec"), {})
-        except Exception as e:
-            try:
-                line_to_node: Dict[int, ast.AST] = {}
-                for node in dfs_walk(tree):
-                    line_to_node.setdefault(getattr(node, "lineno", -1), node)
-                # Time to commit several sins against CPython implementation details
-                tb_except = traceback.TracebackException(
-                    type(e), e, e.__traceback__.tb_next  # type: ignore
+            line_to_node: Dict[int, ast.AST] = {}
+            for node in dfs_walk(tree):
+                line_to_node.setdefault(getattr(node, "lineno", -1), node)
+
+            def code_for_line(lineno: int) -> str:
+                node = line_to_node[lineno]
+                # Don't unparse nested child statements. Note this destroys the tree.
+                for _, value in ast.iter_fields(node):
+                    if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                        value.clear()
+                return unparse(node, short_fallback=True).strip()
+
+            # Time to commit several sins against CPython implementation details
+            tb_except = traceback.TracebackException(
+                type(e), e, e.__traceback__.tb_next  # type: ignore
+            )
+            for fs in tb_except.stack:
+                if fs.filename == "<pyp>":
+                    fs._line = code_for_line(fs.lineno)  # type: ignore[attr-defined]
+                    fs.lineno = "PYP_REDACTED"  # type: ignore[assignment]
+
+            tb_format = tb_except.format()
+            assert "Traceback (most recent call last)" in next(tb_format)
+
+            message = "Possible reconstructed traceback (most recent call last):\n"
+            message += "".join(tb_format).strip("\n")
+            message = message.replace(", line PYP_REDACTED", "")
+        except Exception:
+            message = "".join(traceback.format_exception_only(type(e), e)).strip()
+        if isinstance(e, ModuleNotFoundError):
+            message += (
+                "\n\nNote pyp treats undefined names as modules to automatically import. "
+                "Perhaps you forgot to define something or PYP_CONFIG_PATH is set incorrectly?"
+            )
+        if args.before and isinstance(e, NameError):
+            var = str(e)
+            var = var[var.find("'") + 1 : var.rfind("'")]
+            if var in ("lines", "stdin"):
+                message += (
+                    "\n\nNote code in `--before` runs before any magic variables are defined "
+                    "and should not process input. Your command should work by simply removing "
+                    "`--before`, so instead passing in multiple statements in the main section "
+                    "of your code."
                 )
-                tb_except.exc_traceback = None  # type: ignore
-                for fs in tb_except.stack:
-                    if fs.filename == "<pyp>":
-                        fs._line = unparse(line_to_node[fs.lineno]).strip()  # type: ignore
-                        fs.lineno = "PYP_REDACTED"  # type: ignore
-                message = "Possible reconstructed traceback (most recent call last):\n"
-                message += "".join(tb_except.format()).strip("\n")
-                message = message.replace(", line PYP_REDACTED", "")
-            except Exception:
-                message = "".join(traceback.format_exception_only(type(e), e)).strip()
-            if isinstance(e, ModuleNotFoundError):
-                message = (
-                    "Note pyp treats undefined names as modules to automatically import. Perhaps "
-                    "you forgot to define something or PYP_CONFIG_PATH is set incorrectly?\n\n"
-                    + message
-                )
-            raise PypError(
-                "Code raised the following exception, consider using --explain to investigate:\n\n"
-                f"{message}"
-            ) from e
+        raise PypError(
+            "Code raised the following exception, consider using --explain to investigate:\n\n"
+            f"{message}"
+        ) from e
 
 
 def parse_options(args: List[str]) -> argparse.Namespace:
@@ -600,6 +648,7 @@ def parse_options(args: List[str]) -> argparse.Namespace:
         action="store_true",
         help="Defines pypprint, if used, instead of importing it from pyp.",
     )
+    parser.add_argument("--version", action="version", version=f"pyp {__version__}")
     return parser.parse_args(args)
 
 

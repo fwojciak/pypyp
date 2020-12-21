@@ -74,7 +74,8 @@ cat setup.py | pyp 'f"{idx+1: >3} {x}"'
 ```
 
 #### Note so far you haven't had to call `print`!
-By default, pyp will print the last expression in your code — except if it evaluates to `None`.
+By default, pyp will print the last expression in your code — except if it evaluates to `None`
+(or the last statement is `pass`).
 And you can always explicitly call `print` yourself, in which case pyp will stay out of your way.
 
 ```sh
@@ -101,8 +102,8 @@ ls | pyp 'sorted(set(lines))'
 ```
 
 #### pyp lets you run snippets of Python before and after processing input.
-Note if you run into trouble with semicolons and want a new line, you can just pass another string
-to pyp. You can also always pipe pyp to pyp!
+Note if you run into trouble with semicolons and want a new line (without using a multiline string
+in your shell), you can just pass another string to pyp. You can also always pipe pyp to pyp!
 
 ```sh
 # pyp like anything!
@@ -173,6 +174,11 @@ seq 1 110 | pyp 'lines > foreach(int) | where(X > 100) | group_by(X % 3) | sort_
 names, though we skip this in the happy path. If this matters to you, definitely don't
 `from tensorflow import *` in your config! </sub>
 
+#### I have questions!
+
+There's additional documentation and examples at [FAQ](https://github.com/hauntsaninja/pyp/blob/master/FAQ.md).
+If that doesn't answer your question, please open an issue!
+
 ## Related projects
 
 ### [Pyed Piper](https://code.google.com/archive/p/pyp/) aka  Python Power at the Prompt
@@ -215,15 +221,15 @@ For whatever it's worth, I've listed these projects in approximate order of my p
 
 ### [mario](https://github.com/python-mario/mario)
 
-`mario` is a featureful take on shell processing with Python. It doesn't use undefined name detection,
-instead relying on a pluggable subcommand system. While the subcommands can mean a little more
-verbosity than pyp, `mario` makes up some ground by automatic application of functions and a custom
+`mario` is a featureful take on shell processing with Python. It doesn't use undefined name
+detection, instead relying on a pluggable subcommand system. While the subcommands can be more
+verbose than pyp, `mario` makes up some ground by automatic application of functions and a custom
 command chaining syntax. The result can feel a little DSL-like, while pyp tries to feel very close
 to writing Python.
 
 Consider using `mario` if:
 - You find yourself stringing together long sequences of pyp commands and want to be able to
-command chain within a single process.
+command chain within a single process out of the box.
 - You find yourself often needing to reuse complex pyp commands or doing a lot of domain specific
 shell processing that you wish you could reuse with a single command.
 - You want more builtin support for things like processing CSV or TOML.
@@ -233,8 +239,9 @@ Consider pyp if:
 - You want to minimise keystrokes for things that should be quick and easy.
 - You want something minimal and lightweight that feels very close to Python. You don't want to have
 to remember commands.
-- You're happy using Python modules to do domain specific heavy lifting. You don't mind (or want to
-be able to) fall back to a script via `--script` to deal with complexity.
+- You're happy using Python libraries to do domain specific heavy lifting, for easy command chaining
+or syntax sugar. You don't mind (or want to be able to) fall back to a script via `--script` to deal
+with complexity.
 
 ### [xonsh](https://xon.sh/)
 

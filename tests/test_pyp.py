@@ -10,8 +10,9 @@ import traceback
 from typing import List, Optional, Union
 from unittest.mock import patch
 
-import pyp
 import pytest
+
+import pyp
 
 # ====================
 # Helpers
@@ -111,7 +112,7 @@ def test_examples():
     )
     compare_command(example_cmd="echo 'sqrt(9.0)' | bc", pyp_cmd="pyp 'sqrt(9)'")
     compare_command(
-        example_cmd="x=README.md; echo ${x##*.}", pyp_cmd='''pyp "Path('README.md').suffix[1:]"''',
+        example_cmd="x=README.md; echo ${x##*.}", pyp_cmd='''pyp "Path('README.md').suffix[1:]"'''
     )
     compare_command(
         example_cmd="echo '  1 a\n  2 b'", pyp_cmd="""pyp 'f"{idx+1: >3} {x}"'""", input="a\nb"
@@ -159,12 +160,21 @@ def test_user_error():
     with pytest.raises(pyp.PypError, match=pattern):
         run_pyp("pyp '1 / 0'")
 
+    # Test the special cased error messages
     pattern = re.compile(
-        "Code raised.*forgot.*PYP_CONFIG_PATH.*Possible.*import lol.*ModuleNotFoundError", re.DOTALL
+        "Code raised.*Possible.*import lol.*ModuleNotFoundError.*forgot.*PYP_CONFIG_PATH", re.DOTALL
     )
     with pytest.raises(pyp.PypError, match=pattern):
         run_pyp("pyp 'lol'")
 
+    pattern = re.compile(
+        "Code raised.*Possible.*lines.*NameError.*--before.*before any magic variables", re.DOTALL
+    )
+    with pytest.raises(pyp.PypError, match=pattern):
+        run_pyp("pyp -b 'lines = map(int, lines)' 'sum(lines)'")
+
+
+def test_tracebacks():
     # If our sins against traceback implementation details come back to haunt us, and we can't
     # reconstruct a traceback, check that we still output something reasonable
     TBE = traceback.TracebackException
@@ -198,6 +208,10 @@ def test_user_error():
         "ZeroDivisionError: division by zero\n"
     )
     assert pyp_error == message("(", ")") or pyp_error == message("", "")
+
+    # Test tracebacks involving statements with nested child statements
+    pyp_error = run_cmd("""pyp 'if 1 / 0: print("should_not_get_here")'""", check=False)
+    assert "should_not_get_here" not in pyp_error
 
 
 def test_explain():
@@ -250,6 +264,32 @@ def test_get_valid_name():
     with pytest.raises(Exception) as e:
         run_pyp("pyp 'output.foo()'")
     assert isinstance(e.value.__cause__, ImportError)
+
+
+def test_wildcard_import():
+    script1 = """
+#!/usr/bin/env python3
+from shlex import split
+import sys
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+from shlex import *
+split
+"""  # noqa
+    compare_scripts(run_pyp(["--explain", "from shlex import *", "split; pass"]), script1)
+
+    script2 = """
+#!/usr/bin/env python3
+from shlex import split
+import sys
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+from os.path import *
+from shlex import *
+split
+"""  # noqa
+    compare_scripts(
+        run_pyp(["--explain", "from os.path import *", "from shlex import *", "split; pass"]),
+        script2,
+    )
 
 
 # ====================
@@ -322,10 +362,6 @@ smallarray()
 def test_config_invalid(config_mock):
     config_mock.return_value = "import numpy as np\nimport scipy as np"
     with pytest.raises(pyp.PypError, match="Config has multiple definitions"):
-        run_pyp("x")
-
-    config_mock.return_value = "from . import asdf"
-    with pytest.raises(pyp.PypError, match="Config has unsupported import"):
         run_pyp("x")
 
     config_mock.return_value = "f()"
@@ -409,6 +445,10 @@ def test_config_shadow(config_mock):
     config_mock.return_value = "from os.path import *\nfrom shlex import *"
     assert run_pyp("split.__module__") == "shlex\n"
 
+    # shadowing a user passed wildcard import
+    config_mock.return_value = "from os.path import *"
+    assert run_pyp(["from shlex import *", "split.__module__"]) == "shlex\n"
+
 
 @patch("pyp.get_config_contents")
 def test_config_recursive(config_mock):
@@ -454,19 +494,44 @@ try:
     import astunparse
     unparse = astunparse.unparse
 except ImportError:
-    import ast
     unparse = ast.unparse\
 """
-    config_mock.return_value = except_block
+    config_mock.return_value = f"import ast\n{except_block}"
     script2 = f"""
 #!/usr/bin/env python3
-import ast
 import sys
+import ast
 {except_block}
 assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
 unparse(ast.parse('x'))
 """  # noqa
     compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script2)
+
+
+@pytest.mark.xfail(reason="We don't currently support this")
+@patch("pyp.get_config_contents")
+def test_config_conditional_current_shortcoming(config_mock):
+    # TODO: we should be able to ``import ast`` only in the except handler of the ImportError.
+    # However, this causes pyp to think that this config part defines ``ast`` (which is only
+    # sometimes true), resulting in us not importing ast.
+    except_block = """\
+try:
+    import astunparse
+    unparse = astunparse.unparse
+except ImportError:
+    import ast
+    unparse = ast.unparse\
+"""
+    config_mock.return_value = except_block
+    script3 = f"""
+#!/usr/bin/env python3
+import sys
+import ast
+{except_block}
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+unparse(ast.parse('x'))
+"""  # noqa
+    compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script3)
 
 
 def test_config_end_to_end(monkeypatch):
