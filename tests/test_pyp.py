@@ -145,7 +145,7 @@ def test_magic_variable_failures():
         run_pyp("pyp 'print(x); print(len(lines))'")
 
     with pytest.raises(pyp.PypError, match="Multiple candidates for loop"):
-        run_pyp("pyp 'print(x); print(s)'")
+        run_pyp("pyp 'print(x); print(l)'")
 
     with pytest.raises(pyp.PypError, match="Multiple candidates for input"):
         run_pyp("pyp 'stdin; lines'")
@@ -249,6 +249,12 @@ def test_automatic_print_inside_statement():
     assert run_pyp("pyp 'with contextlib.suppress(): x'", input="a\nb") == "a\nb\n"
     with pytest.raises(pyp.PypError, match="Code doesn't generate any output"):
         run_pyp("pyp 'if int(x) > 2: int(x)' 'else: int(x) + 1'")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 8), reason="requires python 3.8 or later")
+def test_automatic_print_nested_scope():
+    with pytest.raises(pyp.PypError, match="Code doesn't generate any output"):
+        run_pyp(["x", "def f(x): (output := x) + 1"])
 
 
 def test_pypprint_basic():
@@ -357,6 +363,98 @@ smallarray()
 """
     compare_scripts(run_pyp(["--explain", "stdin; smallarray(); pass"]), script4)
 
+    # test using wildcard imports in config
+    config_mock.return_value = """
+from typing import *
+any = Any
+    """
+    script5 = """
+#!/usr/bin/env python3
+from typing import Any
+import sys
+any = Any
+stdin = sys.stdin
+stdin
+any
+"""
+    compare_scripts(run_pyp(["--explain", "stdin; any; pass"]), script5)
+
+
+@patch("pyp.get_config_contents")
+def test_config_magic_vars(config_mock):
+    config_mock.return_value = "n = int(x)\nj = json.loads(stdin)\ndef upfront(): pass"
+
+    script1 = """
+#!/usr/bin/env python3
+import json
+import sys
+from pyp import pypprint
+stdin = sys.stdin
+j = json.loads(stdin)
+output = j[0]
+if output is not None:
+    pypprint(output)
+"""
+    compare_scripts(run_pyp(["--explain", "j[0]"]), script1)
+
+    script2 = r"""
+#!/usr/bin/env python3
+import sys
+for x in sys.stdin:
+    x = x.rstrip('\n')
+    n = int(x)
+    if n is not None:
+        print(n)
+"""
+    compare_scripts(run_pyp(["--explain", "n"]), script2)
+
+    config_mock.return_value = """
+f = lambda x: x
+n = int(x)
+o = f(n) + 1
+p = f(o) + 3
+q = f(p) + 5
+"""
+    assert run_pyp("p", input="0\n7") == "4\n11\n"
+    assert run_pyp("q", input="0\n7") == "9\n16\n"
+
+    script3 = r"""
+#!/usr/bin/env python3
+import sys
+f = lambda x: x
+for x in sys.stdin:
+    x = x.rstrip('\n')
+    n = int(x)
+    o = f(n) + 1
+    p = f(o) + 3
+    q = f(p) + 5
+    if q is not None:
+        print(q)
+"""
+    compare_scripts(run_pyp(["--explain", "q"]), script3)
+
+    config_mock.return_value = """
+ilines = (z.rstrip() for z in stdin)
+class Indexable:
+    ...
+idxgen = Indexable(ilines)
+"""
+    script4 = r"""
+#!/usr/bin/env python3
+import sys
+from pyp import pypprint
+
+class Indexable:
+    ...
+stdin = sys.stdin
+ilines = (z.rstrip() for z in stdin)
+idxgen = Indexable(ilines)
+output = idxgen[1]
+if output is not None:
+    pypprint(output)
+"""
+    compare_scripts(run_pyp(["--explain", "idxgen[1]"]), script4)
+
 
 @patch("pyp.get_config_contents")
 def test_config_invalid(config_mock):
@@ -382,6 +480,19 @@ def test_config_invalid(config_mock):
         run_pyp("missing")
     assert isinstance(e.value.__cause__, ImportError)
 
+    config_mock.return_value = "x = 8"
+    with pytest.raises(pyp.PypError, match=r"Config.*cannot redefine built-in.*'x'"):
+        run_pyp("x")
+
+    config_mock.return_value = "stdin = 5"
+    with pytest.raises(pyp.PypError, match=r"Config.*cannot redefine built-in.*'stdin'"):
+        run_pyp("type(stdin).__name__")
+
+    # See test_config_scope for more
+    config_mock.return_value = "def f(x): stdin = 5"
+    run_pyp("x")
+    run_pyp("stdin")
+
 
 @patch("pyp.get_config_contents")
 def test_config_shebang(config_mock):
@@ -406,11 +517,39 @@ def test_config_lazy_wildcard_import(config_mock):
 
 
 @patch("pyp.get_config_contents")
+def test_config_automatic_import(config_mock):
+    config_mock.return_value = "j = json"
+    script1 = """
+#!/usr/bin/env python3
+import json
+import sys
+j = json
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+j
+"""  # noqa
+    compare_scripts(run_pyp(["--explain", "j; pass"]), script1)
+
+    config_mock.return_value = "from typing import *\nL = List"
+    script2 = """
+#!/usr/bin/env python3
+from typing import List
+import sys
+L = List
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+L
+"""  # noqa
+    compare_scripts(run_pyp(["--explain", "L; pass"]), script2)
+
+
+@patch("pyp.get_config_contents")
 def test_config_scope(config_mock):
     config_mock.return_value = """
-def f(x): contextlib = 5
-class A:
-    def asyncio(self): ...
+def f(x, stdin, asyncio):
+    contextlib = 5
+    import asyncio
+class A(asyncio):
+    contextlib = 55
+    def asyncio(self, asyncio): ...
 """
     script = """
 #!/usr/bin/env python3
@@ -431,11 +570,10 @@ def test_config_shadow(config_mock):
     config_mock.return_value = "range = 5"
     assert run_pyp("print(range)") == "5\n"
 
-    # shadowing a magic variable
-    config_mock.return_value = "stdin = 5"
-    assert run_pyp("type(stdin).__name__") == "StringIO\n"
-    config_mock.return_value = "x = 8"
-    assert run_pyp("x") == ""
+    # shadowing print
+    config_mock.return_value = "print = lambda p: p"
+    assert run_pyp("x", input="9") == "9\n"
+    assert run_pyp("print(x)", input="9") == ""
 
     # shadowing a wildcard import
     config_mock.return_value = "from typing import *\nList = 5"
@@ -448,6 +586,12 @@ def test_config_shadow(config_mock):
     # shadowing a user passed wildcard import
     config_mock.return_value = "from os.path import *"
     assert run_pyp(["from shlex import *", "split.__module__"]) == "shlex\n"
+
+
+@patch("pyp.get_config_contents")
+def test_config_automatic_print(config_mock):
+    config_mock.return_value = "def tnirp(p): print(''.join(reversed(p)))"
+    assert run_pyp("tnirp(x)", input="tnirp") == "print\n"
 
 
 @patch("pyp.get_config_contents")
@@ -506,6 +650,9 @@ assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process 
 unparse(ast.parse('x'))
 """  # noqa
     compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script2)
+
+    config_mock.return_value = "foo = False\nif foo: y = 5\nelse: y = 10"
+    assert run_pyp("y") == "10\n"
 
 
 @pytest.mark.xfail(reason="We don't currently support this")

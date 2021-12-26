@@ -3,6 +3,7 @@
 ### Contents
 
 - [I'm running into issues with newlines / complicated statements](#im-running-into-issues-with-newlines--complicated-statements)
+- [What's in your config?](#whats-in-your-config)
 - [What are pyp's dependencies?](#what-are-pyps-dependencies)
 - [Can I customise the shebang on the output of `--script`?](#can-i-customise-the-shebang-on-the-output-of---script)
 - [The output of `--explain` is a little weirdly formatted](#the-output-of---explain-is-a-little-weirdly-formatted)
@@ -48,6 +49,21 @@ Using an ANSI C-quoted string:
 $ pyp --explain $'if int(x) >= 100:\n  x += " is big"\n  print(x)\nelse:\n  print(x + " is small")'
 ```
 
+#### What's in your config?
+
+My config is pretty simple:
+```py
+import numpy as np
+
+n = int(x)
+j = json.loads(stdin)
+f = x.split()
+# like f, but returns None if index is of bounds
+ff = defaultdict(lambda: None, dict(enumerate(x.split())))
+
+d = defaultdict(list)
+```
+
 #### What are pyp's dependencies?
 
 If run on Python 3.9 or later, pyp has no dependencies.
@@ -80,12 +96,12 @@ It's not perceptible in my use of pyp. And remember that if you're piping input 
 processes start in parallel, so this is zero extra wall time if your piped input has any latency.
 
 Here's a benchmark that should basically just be measuring the fixed costs of start up and AST
-transformation (run on my old, not powerful laptop):
+transformation (run on my laptop):
 ```
-$ hyperfine -w 10 -m 100 'pyp x'
+hyperfine -w 10 -m 100 'pyp x'
 Benchmark #1: pyp x
-  Time (mean ± σ):      81.5 ms ±   1.4 ms    [User: 60.3 ms, System: 15.9 ms]
-  Range (min … max):    78.6 ms …  84.8 ms    100 runs
+  Time (mean ± σ):      56.3 ms ±   1.0 ms    [User: 41.2 ms, System: 11.4 ms]
+  Range (min … max):    53.9 ms …  60.3 ms    100 runs
 ```
 
 One note here, as mentioned in the README, is that if you use wildcard imports (`from x import *`)
@@ -100,13 +116,13 @@ Better than awk! ;-)
 ```
 $ hyperfine -w 3 -m 10 "seq 1 999999 | pyp 'sum(map(int, stdin))'"
 Benchmark #1: seq 1 999999 | pyp 'sum(map(int, stdin))'
-  Time (mean ± σ):     490.9 ms ±   4.3 ms    [User: 848.8 ms, System: 26.0 ms]
-  Range (min … max):   487.4 ms … 502.3 ms    10 runs
+  Time (mean ± σ):     258.2 ms ±   5.6 ms    [User: 422.3 ms, System: 17.0 ms]
+  Range (min … max):   252.1 ms … 270.7 ms    11 runs
 
 $ hyperfine -w 3 -m 10 'seq 1 999999 | awk "{s += $0} END {print s}"'
 Benchmark #1: seq 1 999999 | awk "{s += $0} END {print s}"
-  Time (mean ± σ):     754.6 ms ±   4.8 ms    [User: 1.152 s, System: 0.013 s]
-  Range (min … max):   748.9 ms … 763.2 ms    10 runs
+  Time (mean ± σ):     405.3 ms ±   3.4 ms    [User: 599.6 ms, System: 5.5 ms]
+  Range (min … max):   399.4 ms … 410.9 ms    10 runs
 ```
 
 More seriously, random micro benchmark aside, pyp should be fast enough that you shouldn't worry
@@ -119,8 +135,8 @@ yourself processing really large input, it might be better to use the magic vari
 ```
 $ hyperfine -w 3 -m 10 "seq 1 999999 | pyp 'sum(map(int, lines))'"
 Benchmark #1: seq 1 999999 | pyp 'sum(map(int, lines))'
-  Time (mean ± σ):     848.5 ms ± 146.2 ms    [User: 1.157 s, System: 0.087 s]
-  Range (min … max):   748.4 ms … 1239.1 ms    10 runs
+  Time (mean ± σ):     378.9 ms ±   3.2 ms    [User: 530.2 ms, System: 38.5 ms]
+  Range (min … max):   375.4 ms … 384.6 ms    10 runs
 ```
 
 #### Can I use pyp with PyPy?

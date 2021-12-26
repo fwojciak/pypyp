@@ -1,6 +1,6 @@
 # pyp
 
-[![Build Status](https://travis-ci.org/hauntsaninja/pyp.svg?branch=master)](https://travis-ci.org/hauntsaninja/pyp)
+[![Build Status](https://github.com/hauntsaninja/pyp/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/hauntsaninja/pyp/actions/workflows/tests.yml)
 [![Coverage Status](https://coveralls.io/repos/github/hauntsaninja/pyp/badge.svg?branch=master)](https://coveralls.io/github/hauntsaninja/pyp?branch=master)
 [![Checked with mypy](http://www.mypy-lang.org/static/mypy_badge.svg)](http://mypy-lang.org/)
 
@@ -24,7 +24,7 @@ This section will walk you through the details of using pyp, and hopefully repla
 for many common shell utilities. For a cheatsheet / tldr, run `pyp --help`.
 
 #### pyp can easily be used to apply Python code to each line in the input.
-Just use one of the magic variables `x`, `l`, `s` or `line` to refer to the current line.
+Just use one of the magic variables `x`, `l` or `line` to refer to the current line.
 
 ```sh
 # pyp like cut
@@ -174,6 +174,28 @@ seq 1 110 | pyp 'lines > foreach(int) | where(X > 100) | group_by(X % 3) | sort_
 names, though we skip this in the happy path. If this matters to you, definitely don't
 `from tensorflow import *` in your config! </sub>
 
+#### pyp lets you configure your own magic!
+
+If definitions in your config file depend on magic variables, pyp will substitute them in the
+way that makes sense. For example, put the following in your config...
+```py
+n = int(x)
+f = x.split()
+j = json.load(stdin)
+
+import pandas as pd
+csv = pd.read_csv(stdin)
+```
+
+...to make pyp easier than ever for your custom use cases:
+```sh
+ps | pyp 'f[3]'
+
+cat commits.json | pyp 'j[0]["commit"]["author"]'
+
+< cities.csv pyp 'csv.to_string()'
+```
+
 #### I have questions!
 
 There's additional documentation and examples at [FAQ](https://github.com/hauntsaninja/pyp/blob/master/FAQ.md).
@@ -215,6 +237,7 @@ print single expressions or not handling iterables and dicts well.
 - Some of them have specialised support for things like JSON input or running shell commands.
 - Some of them expose the input in interesting ways with custom line / file / stream objects.
 - Some of them have more advanced options for error handling.
+- None of them have powerful configuration like pyp.
 - None of them have anything like `--explain`.
 
 For whatever it's worth, I've listed these projects in approximate order of my personal preference.

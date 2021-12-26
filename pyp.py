@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 
 __all__ = ["pypprint"]
-__version__ = "0.3.3"
+__version__ = "1.0.0"
 
 
 def pypprint(*args, **kwargs):  # type: ignore
@@ -46,12 +46,14 @@ class NameFinder(ast.NodeVisitor):
     An undefined name is any name that is loaded before it is defined (in any scope).
 
     Notes: a) we ignore deletes, b) used builtins will appear in undefined names, c) this logic
-    doesn't fully support comprehension / nonlocal / global / late-binding scopes.
+    doesn't fully support nonlocal / global / late-binding scopes.
 
     """
 
     def __init__(self, *trees: ast.AST) -> None:
         self._scopes: List[Set[str]] = [set()]
+        self._comprehension_scopes: List[int] = []
+
         self.undefined: Set[str] = set()
         self.wildcard_imports: List[str] = []
         for tree in trees:
@@ -72,8 +74,8 @@ class NameFinder(ast.NodeVisitor):
 
     def generic_visit(self, node: ast.AST) -> None:
         def order(f_v: Tuple[str, Any]) -> int:
-            # This ordering fixes comprehensions, loops, assignments
-            return {"generators": -2, "iter": -2, "value": -1}.get(f_v[0], 0)
+            # This ordering fixes comprehensions, dict comps, loops, assignments
+            return {"generators": -3, "iter": -3, "key": -2, "value": -1}.get(f_v[0], 0)
 
         # Adapted from ast.NodeVisitor.generic_visit, but re-orders traversal a little
         for _, value in sorted(ast.iter_fields(node), key=order):
@@ -101,6 +103,18 @@ class NameFinder(ast.NodeVisitor):
             if node.target.id not in self._scopes[-1]:
                 self.undefined.add(node.target.id)
         self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: Any) -> None:
+        self.visit(node.value)
+        # PEP 572 has weird scoping rules
+        assert isinstance(node.target, ast.Name)
+        assert isinstance(node.target.ctx, ast.Store)
+        scope_index = len(self._scopes) - 1
+        comp_index = len(self._comprehension_scopes) - 1
+        while comp_index >= 0 and scope_index == self._comprehension_scopes[comp_index]:
+            scope_index -= 1
+            comp_index -= 1
+        self._scopes[scope_index].add(node.target.id)
 
     def visit_alias(self, node: ast.alias) -> None:
         if node.name != "*":
@@ -159,6 +173,18 @@ class NameFinder(ast.NodeVisitor):
         self.flexible_visit(node.body)
         self._scopes[-1].remove(node.name)
 
+    def visit_comprehension_helper(self, node: Any) -> None:
+        self._comprehension_scopes.append(len(self._scopes))
+        self._scopes.append(set())
+        self.generic_visit(node)
+        self._scopes.pop()
+        self._comprehension_scopes.pop()
+
+    visit_ListComp = visit_comprehension_helper
+    visit_SetComp = visit_comprehension_helper
+    visit_GeneratorExp = visit_comprehension_helper
+    visit_DictComp = visit_comprehension_helper
+
 
 def dfs_walk(node: ast.AST) -> Iterator[ast.AST]:
     """Helper to iterate over an AST depth-first."""
@@ -167,6 +193,21 @@ def dfs_walk(node: ast.AST) -> Iterator[ast.AST]:
         node = stack.pop()
         stack.extend(reversed(list(ast.iter_child_nodes(node))))
         yield node
+
+
+MAGIC_VARS = {
+    "index": {"i", "idx", "index"},
+    "loop": {"line", "x", "l"},
+    "input": {"lines", "stdin"},
+}
+
+
+def is_magic_var(name: str) -> bool:
+    return any(name in vars for vars in MAGIC_VARS.values())
+
+
+class PypError(Exception):
+    pass
 
 
 def get_config_contents() -> str:
@@ -179,10 +220,6 @@ def get_config_contents() -> str:
             return f.read()
     except FileNotFoundError as e:
         raise PypError(f"Config file not found at PYP_CONFIG_PATH={config_file}") from e
-
-
-class PypError(Exception):
-    pass
 
 
 class PypConfig:
@@ -210,6 +247,7 @@ class PypConfig:
         self.parts: List[ast.stmt] = config_ast.body
         # Maps from a name to index of config part that defines it
         self.name_to_def: Dict[str, int] = {}
+        self.def_to_names: Dict[int, List[str]] = defaultdict(list)
         # Maps from index of config part to undefined names it needs
         self.requires: Dict[int, Set[str]] = defaultdict(set)
         # Modules from which automatic imports work without qualification, ordered by AST encounter
@@ -236,7 +274,10 @@ class PypConfig:
             for name in f.top_level_defined:
                 if self.name_to_def.get(name, index) != index:
                     raise PypError(f"Config has multiple definitions of {repr(name)}")
+                if is_magic_var(name):
+                    raise PypError(f"Config cannot redefine built-in magic variable {repr(name)}")
                 self.name_to_def[name] = index
+                self.def_to_names[index].append(name)
             self.requires[index] = f.undefined
             self.wildcard_imports.extend(f.wildcard_imports)
 
@@ -276,12 +317,61 @@ class PypTransform:
         self.defined: Set[str] = f.top_level_defined
         self.undefined: Set[str] = f.undefined
         self.wildcard_imports: List[str] = f.wildcard_imports
+        # We'll always use sys in ``build_input``, so add it to undefined.
+        # This lets config define it or lets us automatically import it later
+        # (If before defines it, we'll just let it override the import...)
+        self.undefined.add("sys")
 
         self.define_pypprint = define_pypprint
         self.config = config
 
         # The print statement ``build_output`` will add, if it determines it needs to.
         self.implicit_print: Optional[ast.Call] = None
+
+    def build_missing_config(self) -> None:
+        """Modifies the AST to define undefined names defined in config."""
+        config_definitions: Set[str] = set()
+        attempt_to_define = set(self.undefined)
+        while attempt_to_define:
+            can_define = attempt_to_define & set(self.config.name_to_def)
+            # The things we can define might in turn require some definitions, so update the things
+            # we need to attempt to define and loop
+            attempt_to_define = set()
+            for name in can_define:
+                config_definitions.update(self.config.def_to_names[self.config.name_to_def[name]])
+                attempt_to_define.update(self.config.requires[self.config.name_to_def[name]])
+            # We don't need to attempt to define things we've already decided we need to define
+            attempt_to_define -= config_definitions
+
+        config_indices = {self.config.name_to_def[name] for name in config_definitions}
+
+        # Run basically the same thing in reverse to see which dependencies stem from magic vars
+        before_config_indices = set(config_indices)
+        derived_magic_indices = {
+            i for i in config_indices if any(map(is_magic_var, self.config.requires[i]))
+        }
+        derived_magic_names = set()
+
+        while derived_magic_indices:
+            before_config_indices -= derived_magic_indices
+            derived_magic_names |= {
+                name for i in derived_magic_indices for name in self.config.def_to_names[i]
+            }
+            derived_magic_indices = {
+                i for i in before_config_indices if self.config.requires[i] & derived_magic_names
+            }
+        magic_config_indices = config_indices - before_config_indices
+
+        before_config_defs = [self.config.parts[i] for i in sorted(before_config_indices)]
+        magic_config_defs = [self.config.parts[i] for i in sorted(magic_config_indices)]
+
+        self.before_tree.body = before_config_defs + self.before_tree.body
+        self.tree.body = magic_config_defs + self.tree.body
+
+        for i in config_indices:
+            self.undefined.update(self.config.requires[i])
+        self.defined |= config_definitions
+        self.undefined -= config_definitions
 
     def define(self, name: str) -> None:
         """Defines a name."""
@@ -311,12 +401,17 @@ class PypTransform:
                 del body[-1]
                 return True
             if not isinstance(body[-1], ast.Expr):
-                # If the last thing in the tree is a statement that has a body (and doesn't have an
-                # orelse, since users could expect the print in that branch), recursively look
-                # for a standalone expression.
-                # Technically, we should check to see that we're not entering a different scope,
-                # e.g., ``pyp 'x' 'def f(x): (output := x) + 1' --explain`` looks problematic.
-                if hasattr(body[-1], "body") and not getattr(body[-1], "orelse", []):
+                if (
+                    # If the last thing in the tree is a statement that has a body
+                    hasattr(body[-1], "body")
+                    # and doesn't have an orelse, since users could expect the print in that branch
+                    and not getattr(body[-1], "orelse", [])
+                    # and doesn't enter a new scope
+                    and not isinstance(
+                        body[-1], (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                    )
+                ):
+                    # ...then recursively look for a standalone expression
                     return inner(body[-1].body, use_pypprint)  # type: ignore
                 return False
 
@@ -366,11 +461,6 @@ class PypTransform:
         How we do this depends on which magic variables are used.
 
         """
-        MAGIC_VARS = {
-            "index": {"i", "idx", "index"},
-            "loop": {"line", "x", "l", "s"},
-            "input": {"lines", "stdin"},
-        }
         possible_vars = {typ: names & self.undefined for typ, names in MAGIC_VARS.items()}
 
         if (possible_vars["loop"] or possible_vars["index"]) and possible_vars["input"]:
@@ -385,9 +475,6 @@ class PypTransform:
             if len(names) > 1:
                 names_str = ", ".join(names)
                 raise PypError(f"Multiple candidates for {typ} variable: {names_str}")
-
-        # We'll use sys here no matter what; add it to undefined so we import it later
-        self.undefined.add("sys")
 
         if possible_vars["loop"] or possible_vars["index"]:
             # We'll loop over stdin and define loop / index variables
@@ -429,27 +516,6 @@ class PypTransform:
             )
             self.tree.body = no_pipe_assertion.body + self.tree.body
             self.use_pypprint_for_implicit_print()
-
-    def build_missing_config(self) -> None:
-        """Modifies the AST to define undefined names defined in config."""
-        config_definitions: Set[str] = set()
-        attempt_to_define = set(self.undefined)
-        while attempt_to_define:
-            can_define = attempt_to_define & set(self.config.name_to_def)
-            config_definitions.update(can_define)
-            # The things we can define might in turn require some definitions, so update the things
-            # we need to attempt to define and loop
-            attempt_to_define = set()
-            for name in can_define:
-                attempt_to_define.update(self.config.requires[self.config.name_to_def[name]])
-            # We don't need to attempt to define things we've already decided we need to define
-            attempt_to_define -= config_definitions
-
-        config_indices = sorted({self.config.name_to_def[name] for name in config_definitions})
-        self.before_tree.body = [
-            self.config.parts[i] for i in config_indices
-        ] + self.before_tree.body
-        self.undefined -= config_definitions
 
     def build_missing_imports(self) -> None:
         """Modifies the AST to import undefined names."""
@@ -501,9 +567,9 @@ class PypTransform:
 
     def build(self) -> ast.Module:
         """Returns a transformed AST."""
+        self.build_missing_config()
         self.build_output()
         self.build_input()
-        self.build_missing_config()
         self.build_missing_imports()
 
         ret = ast.parse("")
@@ -612,7 +678,7 @@ def parse_options(args: List[str]) -> argparse.Namespace:
             "Easily run Python at the shell!\n\n"
             "For help and examples, see https://github.com/hauntsaninja/pyp\n\n"
             "Cheatsheet:\n"
-            "- Use `line`, `x`, `l`, or `s` for a line in the input. Use `i`, `idx` or `index` "
+            "- Use `x`, `l` or `line` for a line in the input. Use `i`, `idx` or `index` "
             "for the index\n"
             "- Use `lines` to get a list of rstripped lines\n"
             "- Use `stdin` to get sys.stdin\n"
