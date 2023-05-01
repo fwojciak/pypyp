@@ -198,15 +198,21 @@ def test_tracebacks():
 
     # Check the entire output, end to end
     pyp_error = run_cmd("pyp 'def f(): 1/0' 'f()'", check=False)
-    message = lambda x, y: (  # noqa
-        "error: Code raised the following exception, consider using --explain to investigate:\n\n"
-        "Possible reconstructed traceback (most recent call last):\n"
-        '  File "<pyp>", in <module>\n'
-        "    output = f()\n"
-        '  File "<pyp>", in f\n'
-        f"    {x}1 / 0{y}\n"
-        "ZeroDivisionError: division by zero\n"
+    message = lambda po, pc: (  # noqa
+        (
+            "error: Code raised the following exception, "
+            "consider using --explain to investigate:\n\n"
+            "Possible reconstructed traceback (most recent call last):\n"
+            '  File "<pyp>", in <module>\n'
+            "    output = f()\n"
+        )
+        + ("     ^^^^^^^^^^^\n" if sys.version_info >= (3, 11) else "")
+        + ('  File "<pyp>", in f\n' f"    {po}1 / 0{pc}\n")
+        + ("          \n" if sys.version_info >= (3, 11) else "")
+        + ("ZeroDivisionError: division by zero\n")
     )
+    print(repr(pyp_error))
+    print(repr(message("", "")))
     assert pyp_error == message("(", ")") or pyp_error == message("", "")
 
     # Test tracebacks involving statements with nested child statements
@@ -219,7 +225,9 @@ def test_explain():
         "pyp --explain -b 'd = defaultdict(list)' 'user, pid, *_ = x.split()' "
         """'d[user].append(pid)' -a 'del d["root"]' -a d"""
     )
-    script = r"""
+    po = "" if sys.version_info >= (3, 11) else "("
+    pc = "" if sys.version_info >= (3, 11) else ")"
+    script = rf"""
 #!/usr/bin/env python3
 from collections import defaultdict
 import sys
@@ -227,7 +235,7 @@ from pyp import pypprint
 d = defaultdict(list)
 for x in sys.stdin:
     x = x.rstrip('\n')
-    (user, pid, *_) = x.split()
+    {po}user, pid, *_{pc} = x.split()
     d[user].append(pid)
 del d['root']
 if d is not None:
@@ -277,7 +285,7 @@ def test_wildcard_import():
 #!/usr/bin/env python3
 from shlex import split
 import sys
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 from shlex import *
 split
 """  # noqa
@@ -287,7 +295,7 @@ split
 #!/usr/bin/env python3
 from shlex import split
 import sys
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 from os.path import *
 from shlex import *
 split
@@ -296,6 +304,16 @@ split
         run_pyp(["--explain", "from os.path import *", "from shlex import *", "split; pass"]),
         script2,
     )
+
+
+def test_fallback_unparse():
+    original_code = """
+x = 2 + 3
+x = x * x
+print((lambda: x)())
+"""
+    code = pyp.fallback_unparse(ast.parse(original_code))
+    assert subprocess.check_output([sys.executable, "-c", code]).decode().strip() == "25"
 
 
 # ====================
@@ -329,7 +347,7 @@ np
 import sys
 import numpy as np
 from scipy.linalg import eigvals
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 eigvals(np.array([[0.0, -1.0], [1.0, 0.0]]))
 """  # noqa
     compare_scripts(
@@ -524,7 +542,7 @@ def test_config_automatic_import(config_mock):
 import json
 import sys
 j = json
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 j
 """  # noqa
     compare_scripts(run_pyp(["--explain", "j; pass"]), script1)
@@ -535,7 +553,7 @@ j
 from typing import List
 import sys
 L = List
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 L
 """  # noqa
     compare_scripts(run_pyp(["--explain", "L; pass"]), script2)
@@ -628,7 +646,7 @@ else:
 import ast
 import sys
 {if_block}
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 unparse(ast.parse('x'))
 """  # noqa
     compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script1)
@@ -646,7 +664,7 @@ except ImportError:
 import sys
 import ast
 {except_block}
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 unparse(ast.parse('x'))
 """  # noqa
     compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script2)
@@ -675,7 +693,7 @@ except ImportError:
 import sys
 import ast
 {except_block}
-assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present"
+assert sys.stdin.isatty() or not sys.stdin.read(), "The command doesn't process input, but input is present. Maybe you meant to use a magic variable like `stdin` or `x`?"
 unparse(ast.parse('x'))
 """  # noqa
     compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script3)

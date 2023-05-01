@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 
 __all__ = ["pypprint"]
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 def pypprint(*args, **kwargs):  # type: ignore
@@ -256,7 +256,7 @@ class PypConfig:
         self.shebang: str = "#!/usr/bin/env python3"
         if config_contents.startswith("#!"):
             self.shebang = "\n".join(
-                itertools.takewhile(lambda l: l.startswith("#"), config_contents.splitlines())
+                itertools.takewhile(lambda line: line.startswith("#"), config_contents.splitlines())
             )
 
         top_level: Tuple[Any, ...] = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -412,7 +412,7 @@ class PypTransform:
                     )
                 ):
                     # ...then recursively look for a standalone expression
-                    return inner(body[-1].body, use_pypprint)  # type: ignore
+                    return inner(body[-1].body, use_pypprint)
                 return False
 
             if isinstance(body[-1].value, ast.Name):
@@ -512,7 +512,8 @@ class PypTransform:
         else:
             no_pipe_assertion = ast.parse(
                 "assert sys.stdin.isatty() or not sys.stdin.read(), "
-                '''"The command doesn't process input, but input is present"'''
+                """"The command doesn't process input, but input is present. """
+                '''Maybe you meant to use a magic variable like `stdin` or `x`?"'''
             )
             self.tree.body = no_pipe_assertion.body + self.tree.body
             self.use_pypprint_for_implicit_print()
@@ -580,6 +581,8 @@ class PypTransform:
             if isinstance(node, ast.stmt):
                 i += 1
             node.lineno = i
+            if sys.version_info >= (3, 8):
+                node.end_lineno = i
 
         return ast.fix_missing_locations(ret)
 
@@ -594,8 +597,14 @@ def unparse(tree: ast.AST, short_fallback: bool = False) -> str:
         return cast(str, astunparse.unparse(tree))
     except ImportError:
         pass
-    if short_fallback:
-        return f"# {ast.dump(tree)}  # --explain has instructions to make this readable"
+    return (
+        fallback_unparse(tree)
+        if not short_fallback
+        else f"# {ast.dump(tree)}  # --explain has instructions to make this readable"
+    )
+
+
+def fallback_unparse(tree: ast.AST) -> str:
     return f"""
 from ast import *
 tree = fix_missing_locations({ast.dump(tree)})
@@ -619,6 +628,8 @@ def run_pyp(args: argparse.Namespace) -> None:
     try:
         exec(compile(tree, filename="<pyp>", mode="exec"), {})
     except Exception as e:
+        # On error, reconstruct a traceback into the generated code
+        # Also add some diagnostics for ModuleNotFoundError and NameError
         try:
             line_to_node: Dict[int, ast.AST] = {}
             for node in dfs_walk(tree):
@@ -638,6 +649,8 @@ def run_pyp(args: argparse.Namespace) -> None:
             )
             for fs in tb_except.stack:
                 if fs.filename == "<pyp>":
+                    if fs.lineno is None:
+                        raise AssertionError("When would this happen?")
                     fs._line = code_for_line(fs.lineno)  # type: ignore[attr-defined]
                     fs.lineno = "PYP_REDACTED"  # type: ignore[assignment]
 
