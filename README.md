@@ -10,7 +10,7 @@ Easily run Python at the shell! Magical, but never mysterious.
 
 Run `pip install pypyp` <sup>(note the extra "yp"!)</sup>
 
-pyp requires Python 3.6 or above.
+pyp requires Python 3.8 or above.
 
 ## How it works
 
@@ -203,19 +203,23 @@ If that doesn't answer your question, please open an issue!
 
 ## Related projects
 
-### [Pyed Piper](https://code.google.com/archive/p/pyp/) aka  Python Power at the Prompt
+### [Pyed Piper](https://github.com/thepyedpiper/pyp) aka  Python Power at the Prompt
 
-pyp takes inspiration (and the command name!) from here.
-However, Pyed Piper appears to be unmaintained, Python 2 only, and further away from Python syntax
-than pyp aims to be. Github mirror [here](https://github.com/yuvadm/pyp/).
+pypyp takes inspiration (and the command name!) from here.
+
+Pyed Piper [had been dead and Python 2 only](https://code.google.com/archive/p/pyp/) for a decade
+when pypyp was written; it appears it's recently been resurrected. Pyed Piper is further away
+from normal Python syntax and APIs than pypyp aims to be. In particular, Pyed Piper has an emphasis
+on piping within Python similar to the way you can combine `pypyp` with `pipetools` in the
+configuration example above.
 
 ### [Pyped](https://github.com/ksamuel/Pyped)
 
-I discovered Pyped while making this project! It's actually very similar, probably similar enough
-that I wouldn't have written this had I known. However, Pyped doesn't do the AST introspection
-and manipulation that we do. This means:
-- It's less magical! It relies on you to pass in flags to tell it what to do, when intention can
-be inferred from the input.
+Pyped is very similar; enough so that I probably wouldn't have written pyp had I known
+about it. But I'm glad I didn't, since Pyped doesn't do the AST introspection and manipulation
+that we do. This means:
+- Pyped relies on you to pass in flags to tell it what to do, when pyp can unambiguously infer
+  intention from the input.
 - It doesn't provide easy automatic printing, or smart printing of iterables and dicts.
 - It hardcodes a list of imports and installs some libraries on your system. This project's
 automatic import will work for any library you use.
@@ -236,11 +240,13 @@ print single expressions or not handling iterables and dicts well.
 - Some of them have custom syntax for in-process command chaining, which can be convenient.
 - Some of them have specialised support for things like JSON input or running shell commands.
 - Some of them expose the input in interesting ways with custom line / file / stream objects.
-- Some of them have more advanced options for error handling.
+- Some of them have more advanced options for error handling (although none of them have pyp's
+  great tracebacks).
 - None of them have powerful configuration like pyp.
 - None of them have anything like `--explain`.
 
-For whatever it's worth, I've listed these projects in approximate order of my personal preference.
+For whatever it's worth, I've listed the projects above in approximate order of my
+personal preference.
 
 ### [mario](https://github.com/python-mario/mario)
 
@@ -255,8 +261,7 @@ Consider using `mario` if:
 command chain within a single process out of the box.
 - You find yourself often needing to reuse complex pyp commands or doing a lot of domain specific
 shell processing that you wish you could reuse with a single command.
-- You want more builtin support for things like processing CSV or TOML.
-- You want to easily be able to use async functions to process your input concurrently.
+- You want to easily be able to use async functions.
 
 Consider pyp if:
 - You want to minimise keystrokes for things that should be quick and easy.

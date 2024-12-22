@@ -110,13 +110,13 @@ def test_more_control_flow():
 
 def test_import():
     check_find_names("import x", {"x"}, set())
+    check_find_names("import x.y", {"x"}, set())
     check_find_names("import y as x", {"x"}, set())
     check_find_names("from y import x", {"x"}, set())
     check_find_names("from y import z as x", {"x"}, set())
     check_find_names("from x import *", set(), set(), wildcard_imports=["x"])
 
 
-@pytest.mark.skipif(sys.version_info < (3, 8), reason="requires python 3.8 or later")
 def test_walrus():
     check_find_names("(x := 1)", {"x"}, set())
     check_find_names("x = (x := 1)", {"x"}, set())

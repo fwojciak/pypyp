@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, cast
 
 __all__ = ["pypprint"]
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 def pypprint(*args, **kwargs):  # type: ignore
@@ -118,7 +118,9 @@ class NameFinder(ast.NodeVisitor):
 
     def visit_alias(self, node: ast.alias) -> None:
         if node.name != "*":
-            self._scopes[-1].add(node.asname if node.asname is not None else node.name)
+            self._scopes[-1].add(
+                node.asname if node.asname is not None else node.name.split(".")[0]
+            )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module is not None and "*" in (a.name for a in node.names):
@@ -218,8 +220,9 @@ def get_config_contents() -> str:
     try:
         with open(config_file, "r") as f:
             return f.read()
-    except FileNotFoundError as e:
-        raise PypError(f"Config file not found at PYP_CONFIG_PATH={config_file}") from e
+    except FileNotFoundError:
+        print(f"warning: Config file not found at PYP_CONFIG_PATH={config_file}", file=sys.stderr)
+        return ""
 
 
 class PypConfig:
@@ -580,9 +583,8 @@ class PypTransform:
         for node in dfs_walk(ret):
             if isinstance(node, ast.stmt):
                 i += 1
-            node.lineno = i
-            if sys.version_info >= (3, 8):
-                node.end_lineno = i
+            node.lineno = i  # type: ignore[attr-defined]
+            node.end_lineno = i  # type: ignore[attr-defined]
 
         return ast.fix_missing_locations(ret)
 
@@ -651,8 +653,13 @@ def run_pyp(args: argparse.Namespace) -> None:
                 if fs.filename == "<pyp>":
                     if fs.lineno is None:
                         raise AssertionError("When would this happen?")
-                    fs._line = code_for_line(fs.lineno)  # type: ignore[attr-defined]
-                    fs.lineno = "PYP_REDACTED"  # type: ignore[assignment]
+                    if sys.version_info >= (3, 13):
+                        fs._lines = code_for_line(fs.lineno)  # type: ignore[attr-defined]
+                        fs.colno = None
+                        fs.lineno = "PYP_REDACTED"  # type: ignore[assignment]
+                    else:
+                        fs._line = code_for_line(fs.lineno)  # type: ignore[attr-defined]
+                        fs.lineno = "PYP_REDACTED"  # type: ignore[assignment]
 
             tb_format = tb_except.format()
             assert "Traceback (most recent call last)" in next(tb_format)

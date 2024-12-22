@@ -198,22 +198,21 @@ def test_tracebacks():
 
     # Check the entire output, end to end
     pyp_error = run_cmd("pyp 'def f(): 1/0' 'f()'", check=False)
-    message = lambda po, pc: (  # noqa
-        (
-            "error: Code raised the following exception, "
-            "consider using --explain to investigate:\n\n"
-            "Possible reconstructed traceback (most recent call last):\n"
-            '  File "<pyp>", in <module>\n'
-            "    output = f()\n"
-        )
-        + ("     ^^^^^^^^^^^\n" if sys.version_info >= (3, 11) else "")
-        + ('  File "<pyp>", in f\n' f"    {po}1 / 0{pc}\n")
-        + ("          \n" if sys.version_info >= (3, 11) else "")
-        + ("ZeroDivisionError: division by zero\n")
+    pyp_error = pyp_error.replace("(1 / 0)", "1 / 0")
+    pyp_error = re.sub(r"\n[\s\^]+\n", "\n", pyp_error)
+    message = (
+        "error: Code raised the following exception, "
+        "consider using --explain to investigate:\n\n"
+        "Possible reconstructed traceback (most recent call last):\n"
+        '  File "<pyp>", in <module>\n'
+        "    output = f()\n"
+        '  File "<pyp>", in f\n'
+        "    1 / 0\n"
+        "ZeroDivisionError: division by zero\n"
     )
-    print(repr(pyp_error))
-    print(repr(message("", "")))
-    assert pyp_error == message("(", ")") or pyp_error == message("", "")
+    print("actual", repr(pyp_error))
+    print("expected", repr(message))
+    assert pyp_error == message
 
     # Test tracebacks involving statements with nested child statements
     pyp_error = run_cmd("""pyp 'if 1 / 0: print("should_not_get_here")'""", check=False)
@@ -259,7 +258,6 @@ def test_automatic_print_inside_statement():
         run_pyp("pyp 'if int(x) > 2: int(x)' 'else: int(x) + 1'")
 
 
-@pytest.mark.skipif(sys.version_info < (3, 8), reason="requires python 3.8 or later")
 def test_automatic_print_nested_scope():
     with pytest.raises(pyp.PypError, match="Code doesn't generate any output"):
         run_pyp(["x", "def f(x): (output := x) + 1"])
@@ -699,14 +697,19 @@ unparse(ast.parse('x'))
     compare_scripts(run_pyp(["--explain", "unparse(ast.parse('x')); pass"]), script3)
 
 
-def test_config_end_to_end(monkeypatch):
+def test_config_end_to_end(monkeypatch, capsys):
     with tempfile.NamedTemporaryFile("w") as f:
-        monkeypatch.setenv("PYP_CONFIG_PATH", f.name)
         config = "def foo(): return 1"
         f.write(config)
         f.flush()
-        assert run_pyp("foo()") == "1\n"
+
+        monkeypatch.setenv("PYP_CONFIG_PATH", f.name)
+        with capsys.disabled():
+            assert run_pyp("foo()") == "1\n"
 
         monkeypatch.setenv("PYP_CONFIG_PATH", f.name + "_does_not_exist")
-        with pytest.raises(pyp.PypError, match=f"Config file not found.*{f.name}"):
+        with pytest.raises(pyp.PypError, match="No module named 'foo'"):
             run_pyp("foo()")
+
+        stderr = capsys.readouterr().err
+        assert f"warning: Config file not found at PYP_CONFIG_PATH={f.name}" in stderr
